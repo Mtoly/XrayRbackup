@@ -43,6 +43,7 @@ type APIClient struct {
 func New(apiConfig *api.Config) *APIClient {
 
 	client := resty.New()
+	client.SetHeader("User-Agent", "XrayR/0.9.6")
 	client.SetRetryCount(3)
 	if apiConfig.Timeout > 0 {
 		client.SetTimeout(time.Duration(apiConfig.Timeout) * time.Second)
@@ -150,8 +151,10 @@ func (c *APIClient) parseResponse(res *resty.Response, path string, err error) (
 // GetNodeInfo will pull NodeInfo Config from panel
 func (c *APIClient) GetNodeInfo() (nodeInfo *api.NodeInfo, err error) {
 	var nodeType string
-	switch c.NodeType {
-	case "V2ray", "Vmess", "Vless", "Trojan", "Shadowsocks":
+	switch strings.ToLower(c.NodeType) {
+	case "v2ray", "vmess", "vless":
+		nodeType = "v2ray"
+	case "trojan", "shadowsocks":
 		nodeType = strings.ToLower(c.NodeType)
 	default:
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)

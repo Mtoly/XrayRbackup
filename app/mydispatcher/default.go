@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
@@ -91,8 +92,10 @@ func (r *cachedReader) Interrupt() {
 	r.reader.Interrupt()
 }
 
-// DefaultDispatcher is a default implementation of Dispatcher.
+// DefaultDispatcher is a custom implementation that embeds the official dispatcher
+// and adds XrayR-specific features like rate limiting and rule management.
 type DefaultDispatcher struct {
+	*dispatcher.DefaultDispatcher
 	ohm         outbound.Manager
 	router      routing.Router
 	policy      policy.Manager
@@ -105,11 +108,24 @@ type DefaultDispatcher struct {
 
 func init() {
 	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
-		d := new(DefaultDispatcher)
+		// First create the official dispatcher
+		officialDispatcher := new(dispatcher.DefaultDispatcher)
+		d := &DefaultDispatcher{
+			DefaultDispatcher: officialDispatcher,
+		}
+
 		if err := core.RequireFeatures(ctx, func(om outbound.Manager, router routing.Router, pm policy.Manager, sm stats.Manager, dc dns.Client) error {
 			core.OptionalFeatures(ctx, func(fdns dns.FakeDNSEngine) {
 				d.fdns = fdns
 			})
+			// Initialize the official dispatcher with an empty config
+			dispatcherConfig := &dispatcher.Config{
+				Settings: &dispatcher.SessionConfig{},
+			}
+			if err := officialDispatcher.Init(dispatcherConfig, om, router, pm, sm); err != nil {
+				return err
+			}
+			// Initialize our custom fields
 			return d.Init(config.(*Config), om, router, pm, sm, dc)
 		}); err != nil {
 			return nil, err
@@ -130,9 +146,9 @@ func (d *DefaultDispatcher) Init(config *Config, om outbound.Manager, router rou
 	return nil
 }
 
-// Type implements common.HasType.
+// Type implements common.HasType for registering as a separate feature, not overriding core dispatcher.
 func (*DefaultDispatcher) Type() interface{} {
-	return routing.DispatcherType()
+	return Type()
 }
 
 // Start implements common.Runnable.
@@ -163,6 +179,8 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 	sessionInbound := session.InboundFromContext(ctx)
 	var user *protocol.MemoryUser
 	if sessionInbound != nil {
+		// Disable splice to avoid Vision/REALITY bypassing stats path
+		sessionInbound.CanSpliceCopy = 3
 		user = sessionInbound.User
 	}
 
@@ -383,20 +401,10 @@ func sniffer(ctx context.Context, cReader *cachedReader, metadataOnly bool, netw
 }
 
 func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {
-	outbounds := session.OutboundsFromContext(ctx)
-	ob := outbounds[len(outbounds)-1]
-	if hosts, ok := d.dns.(dns.HostsLookup); ok && destination.Address.Family().IsDomain() {
-		proxied := hosts.LookupHosts(ob.Target.String())
-		if proxied != nil {
-			ro := ob.RouteTarget == destination
-			destination.Address = *proxied
-			if ro {
-				ob.RouteTarget = destination
-			} else {
-				ob.Target = destination
-			}
-		}
-	}
+	// Note: dns.HostsLookup interface has been removed in Xray-core v25.10.15
+	// The hosts lookup functionality is now handled internally by the DNS client
+	// Previous code for hosts lookup has been removed to maintain compatibility
+	// with the new Xray-core version
 
 	var handler outbound.Handler
 
